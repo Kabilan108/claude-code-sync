@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.8] - 2025-01-19
+
+### Fixed
+
+- Fixed sync payload field mapping: `sessionId` now transforms to `externalId` for backend compatibility
+- Fixed message sync: `messageId` transforms to `externalId`, `sessionId` to `sessionExternalId`, `content` to `textContent`
+- Fixed `synctest` command failing with ArgumentValidationError for missing `externalId` field
+- Added `transformSession` and `transformMessage` methods to properly map plugin fields to backend schema
+- Re-throw errors in sync methods to surface failures properly
+
 ### Added
 
 - `setup` command to automatically configure Claude Code hooks in `~/.claude/settings.json`

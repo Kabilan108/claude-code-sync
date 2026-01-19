@@ -231,19 +231,67 @@ export class SyncClient {
     return response.json();
   }
 
+  // Transform session data to backend format
+  private transformSession(session: SessionData): Record<string, unknown> {
+    return {
+      externalId: session.sessionId,
+      title: session.title,
+      projectPath: session.projectPath || session.cwd,
+      projectName: session.projectName,
+      model: session.model,
+      source: session.source,
+      promptTokens: session.tokenUsage?.input,
+      completionTokens: session.tokenUsage?.output,
+      cost: session.costEstimate,
+      durationMs: session.endedAt && session.startedAt
+        ? new Date(session.endedAt).getTime() - new Date(session.startedAt).getTime()
+        : undefined,
+    };
+  }
+
+  // Transform message data to backend format
+  private transformMessage(message: MessageData): Record<string, unknown> {
+    return {
+      sessionExternalId: message.sessionId,
+      externalId: message.messageId,
+      role: message.role,
+      textContent: message.content || message.toolResult,
+      model: undefined,
+      durationMs: message.durationMs,
+      source: message.source,
+      // Tool use info stored in parts
+      parts: message.toolName
+        ? [
+            {
+              type: "tool_use",
+              content: {
+                toolName: message.toolName,
+                args: message.toolArgs,
+                result: message.toolResult,
+              },
+            },
+          ]
+        : undefined,
+    };
+  }
+
   async syncSession(session: SessionData): Promise<void> {
     try {
-      await this.request("/sync/session", session);
+      const payload = this.transformSession(session);
+      await this.request("/sync/session", payload);
     } catch (error) {
       console.error("Failed to sync session:", error);
+      throw error;
     }
   }
 
   async syncMessage(message: MessageData): Promise<void> {
     try {
-      await this.request("/sync/message", message);
+      const payload = this.transformMessage(message);
+      await this.request("/sync/message", payload);
     } catch (error) {
       console.error("Failed to sync message:", error);
+      throw error;
     }
   }
 
@@ -252,9 +300,15 @@ export class SyncClient {
     messages: MessageData[]
   ): Promise<void> {
     try {
-      await this.request("/sync/batch", { sessions, messages });
+      const transformedSessions = sessions.map((s) => this.transformSession(s));
+      const transformedMessages = messages.map((m) => this.transformMessage(m));
+      await this.request("/sync/batch", {
+        sessions: transformedSessions,
+        messages: transformedMessages,
+      });
     } catch (error) {
       console.error("Failed to sync batch:", error);
+      throw error;
     }
   }
 
