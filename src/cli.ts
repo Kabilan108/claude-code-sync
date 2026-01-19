@@ -166,7 +166,8 @@ program
     console.log("\nConfiguration saved!");
     console.log(`   URL: ${convexUrl}`);
     console.log(`   Key: ${maskApiKey(apiKey)}`);
-    console.log("\nAdd the plugin to your Claude Code config to start syncing.\n");
+    console.log("\nNext step: Run the setup command to configure Claude Code hooks:\n");
+    console.log("   claude-code-sync setup\n");
   });
 
 program
