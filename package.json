@@ -1,0 +1,51 @@
+{
+  "name": "claude-code-sync",
+  "version": "0.1.0",
+  "description": "Sync your Claude Code sessions to OpenSync dashboard",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "claude-code-sync": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "prepublishOnly": "npm run build",
+    "test": "echo \"No tests yet\" && exit 0"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "sync",
+    "opensync",
+    "ai",
+    "coding",
+    "sessions",
+    "convex"
+  ],
+  "author": "Wayne Sutton",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/waynesutton/claude-code-sync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/waynesutton/claude-code-sync/issues"
+  },
+  "homepage": "https://github.com/waynesutton/claude-code-sync#readme",
+  "dependencies": {
+    "commander": "^12.1.0",
+    "node-fetch": "^3.3.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "typescript": "^5.3.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
+}
