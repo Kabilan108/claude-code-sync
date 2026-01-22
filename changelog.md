@@ -6,6 +6,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.14] - 2025-01-22
+
+### Changed
+
+- Version bump for npm publish (v0.1.13 features now available on npm)
+
+## [0.1.13] - 2025-01-22
+
+### Added
+
+- Cost calculation with proper cache token pricing (90% discount for cache reads, 25% premium for cache writes)
+- MODEL_PRICING constant with pricing for all Claude models including Opus 4, Sonnet 4, and Haiku 3.5
+- calculateCost function to compute session cost from token usage
+- Duration calculation from transcript timestamps (startedAt, endedAt, durationMs)
+- Session title extraction from transcript slug field
+- Tool call counting from transcript content
+- Git branch extraction in SessionStart handler
+- TranscriptStats interface for comprehensive transcript data
+- Cache token tracking (cacheCreationTokens, cacheReadTokens) separate from input tokens
+- parseTranscript function added to index.ts for createPlugin usage
+- MessagePart interface for structured tool call/result parts
+
+### Changed
+
+- parseTranscriptFile now returns TranscriptStats with detailed token breakdown and duration info
+- SessionState extended to track duration, title, cwd, cost estimate, and cache tokens
+- Event interfaces updated to match actual Claude Code hook payloads (session_id, transcript_path)
+- SessionData.endReason now accepts additional reason types (clear, logout, prompt_input_exit, other)
+- SessionStart handler parses transcript for initial model, title, and cwd
+- SessionEnd handler calculates cost from transcript data when not provided by Claude Code
+- Stop handler updates session with model, cost, and duration from transcript
+
+### Fixed
+
+- Sessions now show accurate cost estimates even when Claude Code does not provide costEstimate
+- Model name now correctly syncs from transcript data
+- Duration now calculated from actual transcript timestamps
+
 ## [0.1.11] - 2025-01-22
 
 ### Fixed

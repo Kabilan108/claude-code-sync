@@ -27,6 +27,7 @@ import {
 // Types for Claude Code hook event data from stdin
 interface HookSessionStartData {
   session_id: string;
+  transcript_path?: string;
   cwd?: string;
   model?: string;
   permission_mode?: string;
@@ -37,7 +38,9 @@ interface HookSessionStartData {
 
 interface HookSessionEndData {
   session_id: string;
-  reason?: "user_stop" | "max_turns" | "error" | "completed";
+  transcript_path?: string;
+  cwd?: string;
+  reason?: string;
   message_count?: number;
   tool_call_count?: number;
   total_token_usage?: {
@@ -106,6 +109,61 @@ interface TranscriptEntry {
   message?: TranscriptMessage;
   sessionId?: string;
   parentUuid?: string;
+  cwd?: string;
+  slug?: string;
+}
+
+// Extended stats from transcript parsing (includes cache tokens and duration)
+interface TranscriptStats {
+  model: string | undefined;
+  inputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  outputTokens: number;
+  messageCount: number;
+  toolCallCount: number;
+  title: string | undefined;
+  cwd: string | undefined;
+  startedAt: string | undefined;
+  endedAt: string | undefined;
+  durationMs: number | undefined;
+}
+
+// Pricing per million tokens (USD) with cache pricing
+// Source: https://www.anthropic.com/pricing
+const MODEL_PRICING: Record<string, { input: number; output: number; cacheWrite: number; cacheRead: number }> = {
+  "claude-sonnet-4-20250514": { input: 3.00, output: 15.00, cacheWrite: 3.75, cacheRead: 0.30 },
+  "claude-opus-4-20250514": { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
+  "claude-opus-4-5-20251101": { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
+  "claude-3-5-sonnet-20241022": { input: 3.00, output: 15.00, cacheWrite: 3.75, cacheRead: 0.30 },
+  "claude-3-opus-20240229": { input: 15.00, output: 75.00, cacheWrite: 18.75, cacheRead: 1.50 },
+  "claude-3-5-haiku-20241022": { input: 0.80, output: 4.00, cacheWrite: 1.00, cacheRead: 0.08 },
+};
+
+// Calculate cost from model and token usage with proper cache pricing
+function calculateCost(model: string | undefined, stats: TranscriptStats): number {
+  if (!model) return 0;
+
+  // Try exact match first
+  let pricing = MODEL_PRICING[model];
+
+  // Try partial match if exact match fails
+  if (!pricing) {
+    const matchingKey = Object.keys(MODEL_PRICING).find(k => model.includes(k) || k.includes(model));
+    if (matchingKey) {
+      pricing = MODEL_PRICING[matchingKey];
+    }
+  }
+
+  if (!pricing) return 0;
+
+  // Calculate cost with proper cache pricing
+  const inputCost = stats.inputTokens * pricing.input;
+  const cacheWriteCost = stats.cacheCreationTokens * pricing.cacheWrite;
+  const cacheReadCost = stats.cacheReadTokens * pricing.cacheRead;
+  const outputCost = stats.outputTokens * pricing.output;
+
+  return (inputCost + cacheWriteCost + cacheReadCost + outputCost) / 1_000_000;
 }
 
 // Types for Claude Code settings.json
@@ -602,8 +660,17 @@ interface SessionState {
     model?: string;
     firstPrompt?: string;
     tokenUsage?: { input: number; output: number };
+    cacheCreationTokens?: number;
+    cacheReadTokens?: number;
     messageCount?: number;
+    toolCallCount?: number;
     syncedMessageUuids?: Set<string> | string[];
+    startedAt?: string;
+    endedAt?: string;
+    durationMs?: number;
+    title?: string;
+    cwd?: string;
+    costEstimate?: number;
   };
 }
 
@@ -662,7 +729,7 @@ function generateTitle(prompt: string): string {
   return trimmed;
 }
 
-// Parse transcript file to extract assistant messages and token usage
+// Parse transcript file to extract assistant messages, token usage, and stats
 interface ParsedTranscript {
   assistantMessages: Array<{
     uuid: string;
@@ -670,16 +737,26 @@ interface ParsedTranscript {
     timestamp: string;
     model?: string;
   }>;
-  tokenUsage: {
-    input: number;
-    output: number;
-  };
+  stats: TranscriptStats;
 }
 
 function parseTranscriptFile(transcriptPath: string): ParsedTranscript {
   const result: ParsedTranscript = {
     assistantMessages: [],
-    tokenUsage: { input: 0, output: 0 },
+    stats: {
+      model: undefined,
+      inputTokens: 0,
+      cacheCreationTokens: 0,
+      cacheReadTokens: 0,
+      outputTokens: 0,
+      messageCount: 0,
+      toolCallCount: 0,
+      title: undefined,
+      cwd: undefined,
+      startedAt: undefined,
+      endedAt: undefined,
+      durationMs: undefined,
+    },
   };
 
   try {
@@ -690,6 +767,8 @@ function parseTranscriptFile(transcriptPath: string): ParsedTranscript {
     const content = fs.readFileSync(transcriptPath, "utf-8");
     const lines = content.trim().split("\n");
     const seenUuids = new Set<string>();
+    let firstTimestamp: string | undefined;
+    let lastTimestamp: string | undefined;
 
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -697,12 +776,38 @@ function parseTranscriptFile(transcriptPath: string): ParsedTranscript {
       try {
         const entry = JSON.parse(line) as TranscriptEntry;
 
-        // Only process assistant messages
+        // Track timestamps for duration calculation
+        if (entry.timestamp) {
+          if (!firstTimestamp) {
+            firstTimestamp = entry.timestamp;
+          }
+          lastTimestamp = entry.timestamp;
+        }
+
+        // Get cwd and title from first entry that has them
+        if (!result.stats.cwd && entry.cwd) {
+          result.stats.cwd = entry.cwd;
+        }
+        if (!result.stats.title && entry.slug) {
+          result.stats.title = entry.slug;
+        }
+
+        // Count user messages
+        if (entry.type === "user") {
+          result.stats.messageCount++;
+        }
+
+        // Process assistant messages
         if (entry.type === "assistant" && entry.message) {
           const msg = entry.message;
           const uuid = entry.uuid || "";
 
-          // Skip if we've already seen this UUID (dedup)
+          // Get model from first assistant message
+          if (msg.model && !result.stats.model) {
+            result.stats.model = msg.model;
+          }
+
+          // Skip duplicate UUIDs for message extraction
           if (uuid && seenUuids.has(uuid)) continue;
           if (uuid) seenUuids.add(uuid);
 
@@ -717,20 +822,34 @@ function parseTranscriptFile(transcriptPath: string): ParsedTranscript {
                   model: msg.model,
                 });
               }
+              // Count tool uses
+              if (part.type === "tool_use") {
+                result.stats.toolCallCount++;
+              }
             }
           }
 
-          // Accumulate token usage from all assistant messages
+          // Accumulate token usage (separate cache tokens for cost calculation)
           if (msg.usage) {
-            result.tokenUsage.input +=
-              (msg.usage.input_tokens || 0) +
-              (msg.usage.cache_read_input_tokens || 0) +
-              (msg.usage.cache_creation_input_tokens || 0);
-            result.tokenUsage.output += msg.usage.output_tokens || 0;
+            result.stats.inputTokens += msg.usage.input_tokens || 0;
+            result.stats.cacheCreationTokens += msg.usage.cache_creation_input_tokens || 0;
+            result.stats.cacheReadTokens += msg.usage.cache_read_input_tokens || 0;
+            result.stats.outputTokens += msg.usage.output_tokens || 0;
           }
         }
       } catch {
         // Skip malformed lines
+      }
+    }
+
+    // Calculate duration from timestamps
+    if (firstTimestamp && lastTimestamp) {
+      result.stats.startedAt = firstTimestamp;
+      result.stats.endedAt = lastTimestamp;
+      const startMs = new Date(firstTimestamp).getTime();
+      const endMs = new Date(lastTimestamp).getTime();
+      if (!isNaN(startMs) && !isNaN(endMs)) {
+        result.stats.durationMs = endMs - startMs;
       }
     }
   } catch {
@@ -772,28 +891,64 @@ program
       switch (event) {
         case "SessionStart": {
           const data = JSON.parse(input) as HookSessionStartData;
+
+          // Parse transcript if available to get initial info
+          let stats: TranscriptStats | undefined;
+          if (data.transcript_path && fs.existsSync(data.transcript_path)) {
+            const parsed = parseTranscriptFile(data.transcript_path);
+            stats = parsed.stats;
+          }
+
+          const cwd = stats?.cwd || data.cwd;
+          const startedAt = new Date().toISOString();
           
           // Initialize session state
           sessionState[data.session_id] = {
-            model: data.model,
+            model: stats?.model || data.model,
             tokenUsage: { input: 0, output: 0 },
+            cacheCreationTokens: 0,
+            cacheReadTokens: 0,
             messageCount: 0,
+            toolCallCount: 0,
+            startedAt,
+            title: stats?.title,
+            cwd,
           };
           saveSessionState(sessionState);
           
           const session: SessionData = {
             sessionId: data.session_id,
             source: "claude-code",
-            cwd: data.cwd,
-            model: data.model,
+            cwd,
+            model: stats?.model || data.model,
+            title: stats?.title,
             permissionMode: data.permission_mode,
             thinkingEnabled: data.thinking_enabled,
             mcpServers: data.mcp_servers,
             startType: data.source === "startup" ? "new" : (data.source as SessionData["startType"]),
-            startedAt: new Date().toISOString(),
-            projectPath: data.cwd,
-            projectName: data.cwd ? data.cwd.split("/").pop() : undefined,
+            startedAt,
+            projectPath: cwd,
+            projectName: cwd ? path.basename(cwd) : undefined,
           };
+
+          // Try to get git branch from cwd
+          if (cwd) {
+            try {
+              const gitDir = path.join(cwd, ".git");
+              if (fs.existsSync(gitDir)) {
+                const headFile = path.join(gitDir, "HEAD");
+                if (fs.existsSync(headFile)) {
+                  const head = fs.readFileSync(headFile, "utf-8").trim();
+                  if (head.startsWith("ref: refs/heads/")) {
+                    session.gitBranch = head.replace("ref: refs/heads/", "");
+                  }
+                }
+              }
+            } catch {
+              // Ignore git errors
+            }
+          }
+
           await client.syncSession(session);
           break;
         }
@@ -801,20 +956,58 @@ program
         case "SessionEnd": {
           const data = JSON.parse(input) as HookSessionEndData;
           const state = sessionState[data.session_id] || {};
-          
-          // Calculate final token usage
-          const finalTokenUsage = data.total_token_usage || state.tokenUsage;
-          
+
+          // Parse transcript to get final stats including model, tokens, cost
+          let stats: TranscriptStats = {
+            model: state.model,
+            inputTokens: state.tokenUsage?.input || 0,
+            cacheCreationTokens: state.cacheCreationTokens || 0,
+            cacheReadTokens: state.cacheReadTokens || 0,
+            outputTokens: state.tokenUsage?.output || 0,
+            messageCount: state.messageCount || 0,
+            toolCallCount: state.toolCallCount || 0,
+            title: state.title,
+            cwd: state.cwd || data.cwd,
+            startedAt: state.startedAt,
+            endedAt: state.endedAt,
+            durationMs: state.durationMs,
+          };
+
+          if (data.transcript_path && fs.existsSync(data.transcript_path)) {
+            const parsed = parseTranscriptFile(data.transcript_path);
+            stats = parsed.stats;
+          }
+
+          // Calculate cost from tokens (with proper cache pricing)
+          let cost = data.cost_estimate;
+          if ((cost === undefined || cost === null || cost === 0) && stats.model) {
+            if (stats.inputTokens || stats.outputTokens || stats.cacheReadTokens || stats.cacheCreationTokens) {
+              cost = calculateCost(stats.model, stats);
+            }
+          }
+
+          const cwd = stats.cwd || data.cwd;
+          const totalInputTokens = stats.inputTokens + stats.cacheCreationTokens + stats.cacheReadTokens;
+          const endedAt = stats.endedAt || new Date().toISOString();
+
           const session: SessionData = {
             sessionId: data.session_id,
             source: "claude-code",
-            title: state.firstPrompt ? generateTitle(state.firstPrompt) : undefined,
+            model: stats.model,
+            title: stats.title || (state.firstPrompt ? generateTitle(state.firstPrompt) : undefined),
+            cwd,
+            projectPath: cwd,
+            projectName: cwd ? path.basename(cwd) : undefined,
             endReason: data.reason,
-            messageCount: data.message_count || state.messageCount,
-            toolCallCount: data.tool_call_count,
-            tokenUsage: finalTokenUsage,
-            costEstimate: data.cost_estimate,
-            endedAt: new Date().toISOString(),
+            messageCount: data.message_count || stats.messageCount,
+            toolCallCount: data.tool_call_count || stats.toolCallCount,
+            tokenUsage: {
+              input: totalInputTokens,
+              output: stats.outputTokens,
+            },
+            costEstimate: cost,
+            startedAt: stats.startedAt,
+            endedAt,
           };
           await client.syncSession(session);
           
@@ -888,10 +1081,39 @@ program
           // Parse transcript file to extract assistant messages and token usage
           if (data.transcript_path) {
             const transcript = parseTranscriptFile(data.transcript_path);
+            const { stats } = transcript;
             
-            // Update token usage from transcript
-            if (transcript.tokenUsage.input > 0 || transcript.tokenUsage.output > 0) {
-              state.tokenUsage = transcript.tokenUsage;
+            // Update token usage from transcript (track cache tokens separately)
+            if (stats.inputTokens > 0 || stats.outputTokens > 0 || stats.cacheReadTokens > 0) {
+              const totalInput = stats.inputTokens + stats.cacheCreationTokens + stats.cacheReadTokens;
+              state.tokenUsage = { input: totalInput, output: stats.outputTokens };
+              state.cacheCreationTokens = stats.cacheCreationTokens;
+              state.cacheReadTokens = stats.cacheReadTokens;
+            }
+
+            // Update model if found
+            if (stats.model && !state.model) {
+              state.model = stats.model;
+            }
+
+            // Update title if found from transcript slug
+            if (stats.title && !state.title) {
+              state.title = stats.title;
+            }
+
+            // Update duration info
+            if (stats.startedAt) state.startedAt = stats.startedAt;
+            if (stats.endedAt) state.endedAt = stats.endedAt;
+            if (stats.durationMs) state.durationMs = stats.durationMs;
+
+            // Update tool call count
+            if (stats.toolCallCount > 0) {
+              state.toolCallCount = stats.toolCallCount;
+            }
+
+            // Calculate cost if we have model and tokens
+            if (stats.model && (stats.inputTokens || stats.outputTokens || stats.cacheReadTokens)) {
+              state.costEstimate = calculateCost(stats.model, stats);
             }
             
             // Track which messages we've already synced to avoid duplicates
@@ -927,12 +1149,15 @@ program
           sessionState[data.session_id] = state;
           saveSessionState(sessionState);
           
-          // Update session with token usage from transcript
+          // Update session with token usage, model, and cost from transcript
           const session: SessionData = {
             sessionId: data.session_id,
             source: "claude-code",
+            model: state.model,
             tokenUsage: state.tokenUsage,
             messageCount: state.messageCount,
+            toolCallCount: state.toolCallCount,
+            costEstimate: state.costEstimate,
           };
           await client.syncSession(session);
           break;

@@ -23,11 +23,23 @@
 - [x] v0.1.11: Add message deduplication with UUID tracking
 - [x] v0.1.11: Add model field to MessageData interface
 - [x] v0.1.11: Add upgrade instructions to README
-- [x] v0.1.11: Create claude-code-sync-111.md documenting the fix
+- [x] v0.1.13: Add cost calculation with cache token pricing (MODEL_PRICING, calculateCost)
+- [x] v0.1.13: Add duration calculation from transcript timestamps
+- [x] v0.1.13: Add TranscriptStats interface for comprehensive transcript data
+- [x] v0.1.13: Extend parseTranscriptFile to track cache tokens separately
+- [x] v0.1.13: Add title extraction from transcript slug field
+- [x] v0.1.13: Add tool call counting from transcript
+- [x] v0.1.13: Add git branch extraction in SessionStart handler
+- [x] v0.1.13: Update event interfaces to match Claude Code hook payloads
+- [x] v0.1.13: Add parseTranscript and calculateCost to index.ts for createPlugin
+- [x] v0.1.13: Add MessagePart interface for tool calls
+- [x] v0.1.13: Merge PR #1 features (model, cost, duration sync)
+- [x] v0.1.14: Version bump for npm publish
 
 ## Pending
 
-- [ ] Publish v0.1.11 to npm
-- [ ] Test with fresh Claude Code session to verify assistant messages sync
-- [ ] Test token usage accumulation across multiple Stop events
+- [ ] Publish v0.1.14 to npm
+- [ ] Test with fresh Claude Code session to verify cost calculation
+- [ ] Test duration tracking across sessions
 - [ ] Consider adding thinking content extraction from transcripts
+- [ ] Close PR #1 after verification
