@@ -92,6 +92,32 @@ Ready! Start Claude Code and sessions will sync automatically.
 
 Sessions will now sync automatically when you use Claude Code.
 
+## Upgrading
+
+To upgrade to the latest version:
+
+```bash
+# Close Claude Code first (important for hooks to reload)
+# Then upgrade the package
+npm update -g claude-code-sync
+
+# Verify the new version
+claude-code-sync --version
+
+# Check your configuration is still valid
+claude-code-sync verify
+```
+
+If you encounter issues after upgrading:
+
+```bash
+# Re-run setup to ensure hooks are configured
+claude-code-sync setup
+
+# Test connectivity
+claude-code-sync synctest
+```
+
 ## CLI Commands
 
 | Command | Description |

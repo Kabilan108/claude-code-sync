@@ -28,28 +28,84 @@ import {
 interface HookSessionStartData {
   session_id: string;
   cwd?: string;
+  model?: string;
   permission_mode?: string;
   source?: string;
+  thinking_enabled?: boolean;
+  mcp_servers?: string[];
 }
 
 interface HookSessionEndData {
   session_id: string;
   reason?: "user_stop" | "max_turns" | "error" | "completed";
+  message_count?: number;
+  tool_call_count?: number;
+  total_token_usage?: {
+    input: number;
+    output: number;
+  };
+  cost_estimate?: number;
 }
 
 interface HookUserPromptData {
   session_id: string;
   prompt: string;
+  timestamp?: string;
 }
 
 interface HookToolUseData {
   session_id: string;
   tool_name: string;
+  tool_use_id?: string;
   tool_input?: Record<string, unknown>;
   tool_result?: {
     output?: string;
     error?: string;
   };
+  duration_ms?: number;
+  success?: boolean;
+}
+
+interface HookStopData {
+  session_id: string;
+  transcript_path?: string;
+  stop_hook_active?: boolean;
+  permission_mode?: string;
+  cwd?: string;
+  hook_event_name?: string;
+}
+
+// Types for Claude Code transcript JSONL entries
+interface TranscriptUsage {
+  input_tokens?: number;
+  output_tokens?: number;
+  cache_read_input_tokens?: number;
+  cache_creation_input_tokens?: number;
+}
+
+interface TranscriptContentPart {
+  type: "text" | "thinking" | "tool_use" | "tool_result";
+  text?: string;
+  thinking?: string;
+  id?: string;
+  name?: string;
+  input?: Record<string, unknown>;
+}
+
+interface TranscriptMessage {
+  content?: TranscriptContentPart[];
+  usage?: TranscriptUsage;
+  model?: string;
+  stop_reason?: string | null;
+}
+
+interface TranscriptEntry {
+  type?: string;
+  uuid?: string;
+  timestamp?: string;
+  message?: TranscriptMessage;
+  sessionId?: string;
+  parentUuid?: string;
 }
 
 // Types for Claude Code settings.json
@@ -533,6 +589,157 @@ program
 // Hook Command (for Claude Code integration)
 // ============================================================================
 
+// Track session state for title generation (first user prompt)
+const SESSION_STATE_FILE = path.join(
+  process.env.HOME || "~",
+  ".config",
+  "claude-code-sync",
+  "session-state.json"
+);
+
+interface SessionState {
+  [sessionId: string]: {
+    model?: string;
+    firstPrompt?: string;
+    tokenUsage?: { input: number; output: number };
+    messageCount?: number;
+    syncedMessageUuids?: Set<string> | string[];
+  };
+}
+
+function loadSessionState(): SessionState {
+  try {
+    if (fs.existsSync(SESSION_STATE_FILE)) {
+      const data = JSON.parse(fs.readFileSync(SESSION_STATE_FILE, "utf-8")) as SessionState;
+      // Convert arrays back to Sets for syncedMessageUuids
+      for (const sessionId of Object.keys(data)) {
+        const session = data[sessionId];
+        if (session.syncedMessageUuids && Array.isArray(session.syncedMessageUuids)) {
+          session.syncedMessageUuids = new Set(session.syncedMessageUuids);
+        }
+      }
+      return data;
+    }
+  } catch {
+    // Ignore errors
+  }
+  return {};
+}
+
+function saveSessionState(state: SessionState): void {
+  try {
+    const dir = path.dirname(SESSION_STATE_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    // Convert Sets to arrays for JSON serialization
+    const serializable: Record<string, unknown> = {};
+    for (const sessionId of Object.keys(state)) {
+      const session = state[sessionId];
+      serializable[sessionId] = {
+        ...session,
+        syncedMessageUuids: session.syncedMessageUuids instanceof Set
+          ? Array.from(session.syncedMessageUuids)
+          : session.syncedMessageUuids,
+      };
+    }
+    fs.writeFileSync(SESSION_STATE_FILE, JSON.stringify(serializable, null, 2));
+  } catch {
+    // Ignore errors
+  }
+}
+
+function generateTitle(prompt: string): string {
+  // Use first 80 chars of first prompt as title, trim at word boundary
+  const trimmed = prompt.slice(0, 80).trim();
+  if (prompt.length > 80) {
+    const lastSpace = trimmed.lastIndexOf(" ");
+    if (lastSpace > 40) {
+      return trimmed.slice(0, lastSpace) + "...";
+    }
+    return trimmed + "...";
+  }
+  return trimmed;
+}
+
+// Parse transcript file to extract assistant messages and token usage
+interface ParsedTranscript {
+  assistantMessages: Array<{
+    uuid: string;
+    text: string;
+    timestamp: string;
+    model?: string;
+  }>;
+  tokenUsage: {
+    input: number;
+    output: number;
+  };
+}
+
+function parseTranscriptFile(transcriptPath: string): ParsedTranscript {
+  const result: ParsedTranscript = {
+    assistantMessages: [],
+    tokenUsage: { input: 0, output: 0 },
+  };
+
+  try {
+    if (!fs.existsSync(transcriptPath)) {
+      return result;
+    }
+
+    const content = fs.readFileSync(transcriptPath, "utf-8");
+    const lines = content.trim().split("\n");
+    const seenUuids = new Set<string>();
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      try {
+        const entry = JSON.parse(line) as TranscriptEntry;
+
+        // Only process assistant messages
+        if (entry.type === "assistant" && entry.message) {
+          const msg = entry.message;
+          const uuid = entry.uuid || "";
+
+          // Skip if we've already seen this UUID (dedup)
+          if (uuid && seenUuids.has(uuid)) continue;
+          if (uuid) seenUuids.add(uuid);
+
+          // Extract text content from message
+          if (msg.content && Array.isArray(msg.content)) {
+            for (const part of msg.content) {
+              if (part.type === "text" && part.text) {
+                result.assistantMessages.push({
+                  uuid,
+                  text: part.text,
+                  timestamp: entry.timestamp || new Date().toISOString(),
+                  model: msg.model,
+                });
+              }
+            }
+          }
+
+          // Accumulate token usage from all assistant messages
+          if (msg.usage) {
+            result.tokenUsage.input +=
+              (msg.usage.input_tokens || 0) +
+              (msg.usage.cache_read_input_tokens || 0) +
+              (msg.usage.cache_creation_input_tokens || 0);
+            result.tokenUsage.output += msg.usage.output_tokens || 0;
+          }
+        }
+      } catch {
+        // Skip malformed lines
+      }
+    }
+  } catch {
+    // Return empty result on error
+  }
+
+  return result;
+}
+
 program
   .command("hook <event>")
   .description("Handle Claude Code hook events (reads stdin)")
@@ -560,15 +767,28 @@ program
 
     try {
       const client = new SyncClient(config);
+      const sessionState = loadSessionState();
 
       switch (event) {
         case "SessionStart": {
           const data = JSON.parse(input) as HookSessionStartData;
+          
+          // Initialize session state
+          sessionState[data.session_id] = {
+            model: data.model,
+            tokenUsage: { input: 0, output: 0 },
+            messageCount: 0,
+          };
+          saveSessionState(sessionState);
+          
           const session: SessionData = {
             sessionId: data.session_id,
             source: "claude-code",
             cwd: data.cwd,
+            model: data.model,
             permissionMode: data.permission_mode,
+            thinkingEnabled: data.thinking_enabled,
+            mcpServers: data.mcp_servers,
             startType: data.source === "startup" ? "new" : (data.source as SessionData["startType"]),
             startedAt: new Date().toISOString(),
             projectPath: data.cwd,
@@ -580,25 +800,61 @@ program
 
         case "SessionEnd": {
           const data = JSON.parse(input) as HookSessionEndData;
+          const state = sessionState[data.session_id] || {};
+          
+          // Calculate final token usage
+          const finalTokenUsage = data.total_token_usage || state.tokenUsage;
+          
           const session: SessionData = {
             sessionId: data.session_id,
             source: "claude-code",
+            title: state.firstPrompt ? generateTitle(state.firstPrompt) : undefined,
             endReason: data.reason,
+            messageCount: data.message_count || state.messageCount,
+            toolCallCount: data.tool_call_count,
+            tokenUsage: finalTokenUsage,
+            costEstimate: data.cost_estimate,
             endedAt: new Date().toISOString(),
           };
           await client.syncSession(session);
+          
+          // Clean up session state
+          delete sessionState[data.session_id];
+          saveSessionState(sessionState);
           break;
         }
 
         case "UserPromptSubmit": {
           const data = JSON.parse(input) as HookUserPromptData;
+          const state = sessionState[data.session_id] || {};
+          
+          // Track first prompt for title generation
+          if (!state.firstPrompt) {
+            state.firstPrompt = data.prompt;
+            sessionState[data.session_id] = state;
+            saveSessionState(sessionState);
+            
+            // Update session with title
+            const session: SessionData = {
+              sessionId: data.session_id,
+              source: "claude-code",
+              title: generateTitle(data.prompt),
+            };
+            await client.syncSession(session);
+          }
+          
+          // Increment message count
+          state.messageCount = (state.messageCount || 0) + 1;
+          sessionState[data.session_id] = state;
+          saveSessionState(sessionState);
+          
           const message: MessageData = {
             sessionId: data.session_id,
-            messageId: `${data.session_id}-${Date.now()}`,
+            messageId: `${data.session_id}-user-${Date.now()}`,
             source: "claude-code",
             role: "user",
             content: data.prompt,
-            timestamp: new Date().toISOString(),
+            timestamp: data.timestamp || new Date().toISOString(),
           };
           await client.syncMessage(message);
           break;
@@ -607,14 +863,17 @@ program
         case "PostToolUse": {
           if (!config.syncToolCalls) break;
           const data = JSON.parse(input) as HookToolUseData;
+          const state = sessionState[data.session_id] || {};
+          
           const message: MessageData = {
             sessionId: data.session_id,
-            messageId: `${data.session_id}-tool-${Date.now()}`,
+            messageId: data.tool_use_id || `${data.session_id}-tool-${Date.now()}`,
             source: "claude-code",
             role: "assistant",
             toolName: data.tool_name,
             toolArgs: data.tool_input,
             toolResult: data.tool_result?.output || data.tool_result?.error,
+            durationMs: data.duration_ms,
             timestamp: new Date().toISOString(),
           };
           await client.syncMessage(message);
@@ -622,8 +881,60 @@ program
         }
 
         case "Stop": {
-          // Stop event indicates Claude finished responding
-          // We could track this but for now just acknowledge
+          // Stop event provides transcript_path - we read it to get messages and tokens
+          const data = JSON.parse(input) as HookStopData;
+          const state = sessionState[data.session_id] || {};
+          
+          // Parse transcript file to extract assistant messages and token usage
+          if (data.transcript_path) {
+            const transcript = parseTranscriptFile(data.transcript_path);
+            
+            // Update token usage from transcript
+            if (transcript.tokenUsage.input > 0 || transcript.tokenUsage.output > 0) {
+              state.tokenUsage = transcript.tokenUsage;
+            }
+            
+            // Track which messages we've already synced to avoid duplicates
+            const syncedMessages = state.syncedMessageUuids instanceof Set
+              ? state.syncedMessageUuids
+              : new Set<string>(Array.isArray(state.syncedMessageUuids) ? state.syncedMessageUuids : []);
+            
+            // Sync new assistant messages
+            for (const msg of transcript.assistantMessages) {
+              // Skip if we've already synced this message
+              if (msg.uuid && syncedMessages.has(msg.uuid)) continue;
+              if (msg.uuid) syncedMessages.add(msg.uuid);
+              
+              // Increment message count
+              state.messageCount = (state.messageCount || 0) + 1;
+              
+              const message: MessageData = {
+                sessionId: data.session_id,
+                messageId: msg.uuid || `${data.session_id}-assistant-${Date.now()}`,
+                source: "claude-code",
+                role: "assistant",
+                content: msg.text,
+                model: msg.model,
+                timestamp: msg.timestamp,
+              };
+              await client.syncMessage(message);
+            }
+            
+            // Store synced message UUIDs (convert Set to array for JSON)
+            state.syncedMessageUuids = syncedMessages;
+          }
+          
+          sessionState[data.session_id] = state;
+          saveSessionState(sessionState);
+          
+          // Update session with token usage from transcript
+          const session: SessionData = {
+            sessionId: data.session_id,
+            source: "claude-code",
+            tokenUsage: state.tokenUsage,
+            messageCount: state.messageCount,
+          };
+          await client.syncSession(session);
           break;
         }
 

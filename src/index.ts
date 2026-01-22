@@ -63,6 +63,7 @@ export interface MessageData {
   durationMs?: number;
   tokenCount?: number;
   timestamp?: string;
+  model?: string;
 }
 
 export interface ToolUseData {
@@ -233,46 +234,84 @@ export class SyncClient {
 
   // Transform session data to backend format
   private transformSession(session: SessionData): Record<string, unknown> {
-    return {
+    const payload: Record<string, unknown> = {
       externalId: session.sessionId,
-      title: session.title,
-      projectPath: session.projectPath || session.cwd,
-      projectName: session.projectName,
-      model: session.model,
       source: session.source,
-      promptTokens: session.tokenUsage?.input,
-      completionTokens: session.tokenUsage?.output,
-      cost: session.costEstimate,
-      durationMs: session.endedAt && session.startedAt
-        ? new Date(session.endedAt).getTime() - new Date(session.startedAt).getTime()
-        : undefined,
     };
+    
+    // Only include fields that are defined
+    if (session.title !== undefined) payload.title = session.title;
+    if (session.projectPath || session.cwd) payload.projectPath = session.projectPath || session.cwd;
+    if (session.projectName) payload.projectName = session.projectName;
+    if (session.model) payload.model = session.model;
+    if (session.tokenUsage?.input !== undefined) payload.promptTokens = session.tokenUsage.input;
+    if (session.tokenUsage?.output !== undefined) payload.completionTokens = session.tokenUsage.output;
+    if (session.costEstimate !== undefined) payload.cost = session.costEstimate;
+    if (session.messageCount !== undefined) payload.messageCount = session.messageCount;
+    if (session.toolCallCount !== undefined) payload.toolCallCount = session.toolCallCount;
+    if (session.endReason) payload.endReason = session.endReason;
+    
+    // Calculate duration if both timestamps exist
+    if (session.endedAt && session.startedAt) {
+      payload.durationMs = new Date(session.endedAt).getTime() - new Date(session.startedAt).getTime();
+    }
+    
+    return payload;
   }
 
   // Transform message data to backend format
   private transformMessage(message: MessageData): Record<string, unknown> {
-    return {
+    const payload: Record<string, unknown> = {
       sessionExternalId: message.sessionId,
       externalId: message.messageId,
       role: message.role,
-      textContent: message.content || message.toolResult,
-      model: undefined,
-      durationMs: message.durationMs,
       source: message.source,
-      // Tool use info stored in parts
-      parts: message.toolName
-        ? [
-            {
-              type: "tool_use",
-              content: {
-                toolName: message.toolName,
-                args: message.toolArgs,
-                result: message.toolResult,
-              },
-            },
-          ]
-        : undefined,
     };
+    
+    // Set textContent for user prompts and assistant responses
+    if (message.content) {
+      payload.textContent = message.content;
+    } else if (message.toolResult && !message.toolName) {
+      // Only use toolResult as textContent if no toolName (fallback)
+      payload.textContent = message.toolResult;
+    }
+    
+    // Include duration if available
+    if (message.durationMs !== undefined) {
+      payload.durationMs = message.durationMs;
+    }
+    
+    // Include token count if available
+    if (message.tokenCount !== undefined) {
+      payload.promptTokens = message.tokenCount;
+    }
+    
+    // Include model if available
+    if (message.model) {
+      payload.model = message.model;
+    }
+    
+    // Tool use info stored in parts
+    if (message.toolName) {
+      payload.parts = [
+        {
+          type: "tool-call",
+          content: {
+            toolName: message.toolName,
+            args: message.toolArgs,
+          },
+        },
+      ];
+      // Add tool result as separate part
+      if (message.toolResult) {
+        (payload.parts as Array<{ type: string; content: unknown }>).push({
+          type: "tool-result",
+          content: message.toolResult,
+        });
+      }
+    }
+    
+    return payload;
   }
 
   async syncSession(session: SessionData): Promise<void> {

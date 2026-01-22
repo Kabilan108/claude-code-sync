@@ -17,10 +17,17 @@
 - [x] Create files.md
 - [x] Create changelog.md
 - [x] Create task.md
+- [x] v0.1.10: Fix "Unknown Tool" display by passing object instead of JSON string
+- [x] v0.1.11: Fix Stop hook to read transcript_path JSONL file instead of expecting response directly
+- [x] v0.1.11: Add parseTranscriptFile() to extract assistant messages and token usage
+- [x] v0.1.11: Add message deduplication with UUID tracking
+- [x] v0.1.11: Add model field to MessageData interface
+- [x] v0.1.11: Add upgrade instructions to README
+- [x] v0.1.11: Create claude-code-sync-111.md documenting the fix
 
 ## Pending
 
-- [ ] Bump version to 0.2.0 for new features
-- [ ] Publish updated package to npm
-- [ ] Test setup command on fresh install
-- [ ] Test hook events with actual Claude Code session
+- [ ] Publish v0.1.11 to npm
+- [ ] Test with fresh Claude Code session to verify assistant messages sync
+- [ ] Test token usage accumulation across multiple Stop events
+- [ ] Consider adding thinking content extraction from transcripts

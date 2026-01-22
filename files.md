@@ -15,13 +15,14 @@ Brief description of each file in the codebase.
 | `changelog.md` | Version history and changes |
 | `files.md` | This file, describes codebase structure |
 | `task.md` | Tracks completed and pending tasks |
+| `claude-code-sync-111.md` | Documents the v0.1.11 fix for transcript parsing |
 
 ## src/
 
 | File | Description |
 |------|-------------|
-| `src/index.ts` | Plugin entry point, exports Config, SyncClient, and hook handlers |
-| `src/cli.ts` | CLI commands: login, logout, status, config, set, setup, verify, synctest, hook |
+| `src/index.ts` | Plugin entry point, exports Config, SyncClient, MessageData (with model field), and hook handlers |
+| `src/cli.ts` | CLI commands and hook handlers. Includes parseTranscriptFile() for reading Claude Code JSONL transcripts, session state tracking, and message deduplication |
 
 ## dist/ (generated)
 
